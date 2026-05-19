@@ -5,20 +5,23 @@ import subprocess
 import pandas as pd
 import streamlit as st
 
+
+
 from main import organize_files
 from undo import undo_last_organization
 from config.settings import get_source_folder, ORGANIZED_FOLDERS, DUPLICATE_FOLDER, LOG_FILE_PATH
 
 
 def _read_logs():
-
     if not os.path.exists(LOG_FILE_PATH):
         return "Log file not found yet."
+
     try:
         with open(LOG_FILE_PATH, "r", encoding="utf-8") as f:
             return f.read()
     except Exception as e:
         return f"Failed to read log file: {e}"
+
 
 
 def build_folder_dataframe(folder_name):
@@ -29,9 +32,15 @@ def build_folder_dataframe(folder_name):
 
     for item in os.listdir(folder_path):
 
+        # Hide internal files
+        if item in [".gitkeep", ".DS_Store"]:
+            continue
+
         item_path = os.path.join(folder_path, item)
 
         if os.path.isfile(item_path):
+
+
             extension = os.path.splitext(item)[1]
 
             if extension == "":
@@ -47,7 +56,7 @@ def build_folder_dataframe(folder_name):
                 "Path": os.path.abspath(item_path)
             })
 
-    return pd.DataFrame(
+    df = pd.DataFrame(
         rows,
         columns=[
             "File Name",
@@ -57,6 +66,9 @@ def build_folder_dataframe(folder_name):
             "Path"
         ]
     )
+
+    return df
+
 
 
 
@@ -69,30 +81,103 @@ def get_folder_path(folder_name: str) -> str:
     return os.path.join(base_folder, folder_name)
 
 
-def open_file(file_path: str):
+def open_file(file_path):
     if not file_path:
-        return False, "No file selected."
+        return False, "Please select a file."
 
     file_path = os.path.abspath(file_path)
 
     if not os.path.exists(file_path):
-        return False, f"File not found: {file_path}"
+        return False, "File not found."
+
+    if not os.path.isfile(file_path):
+        return False, "Invalid file."
 
     try:
         if sys.platform == "darwin":
             subprocess.Popen(["open", file_path])
         elif sys.platform == "win32":
-            os.startfile(file_path)  # type: ignore[attr-defined]
+            os.startfile(file_path)
         else:
             subprocess.Popen(["xdg-open", file_path])
 
-        return True, "File opened successfully."
+        return True, "Opened successfully."
 
     except Exception as error:
         return False, f"Unable to open file: {error}"
 
 
-def delete_file(file_path: str):
+
+def calculate_file_hash(file_path: str) -> str:
+    import hashlib
+
+    hash_md5 = hashlib.md5()
+
+    with open(file_path, "rb") as file:
+        for chunk in iter(lambda: file.read(4096), b""):
+            hash_md5.update(chunk)
+
+    return hash_md5.hexdigest()
+
+
+def find_related_duplicates(selected_path: str):
+    if not selected_path:
+        return []
+
+    selected_path = os.path.abspath(selected_path)
+
+    if not os.path.exists(selected_path):
+        return []
+
+    if not os.path.isfile(selected_path):
+        return []
+
+    try:
+        selected_hash = calculate_file_hash(selected_path)
+    except Exception:
+        return []
+
+    # Scan all organizer folders including Duplicates and Main
+    base_folder = get_source_folder()
+    rel_folders = [
+        "",
+        "Documents",
+        "Images",
+        "Audio",
+        "Videos",
+        "Archives",
+        "Code",
+        "Others",
+        DUPLICATE_FOLDER,
+    ]
+
+    related = []
+
+    for rel in rel_folders:
+        folder_path = os.path.join(base_folder, rel) if rel else base_folder
+        if not os.path.exists(folder_path):
+            continue
+
+        for root, dirs, files in os.walk(folder_path):
+            for item in files:
+                if item in [".gitkeep", ".DS_Store"]:
+                    continue
+
+                item_path = os.path.join(root, item)
+                if not os.path.isfile(item_path):
+                    continue
+
+                try:
+                    if calculate_file_hash(item_path) == selected_hash:
+                        related.append(os.path.abspath(item_path))
+                except Exception:
+                    continue
+
+    # Ensure unique results
+    return sorted(set(related))
+
+
+def delete_file(file_path: str, delete_related: bool = False):
     if not file_path:
         return False, "No file selected."
 
@@ -104,12 +189,31 @@ def delete_file(file_path: str):
     if not os.path.isfile(file_path):
         return False, "Selected path is not a file."
 
+    if os.path.basename(file_path) in [".gitkeep", ".DS_Store"]:
+        return False, "Internal file cannot be deleted."
+
+    targets = [file_path]
+
+    if delete_related:
+        related = find_related_duplicates(file_path)
+        targets = related if related else [file_path]
+
+    deleted_count = 0
+
     try:
-        os.remove(file_path)
+        for path in targets:
+            if os.path.exists(path) and os.path.isfile(path):
+                os.remove(path)
+                deleted_count += 1
+
+        if delete_related and deleted_count > 1:
+            return True, f"Deleted {deleted_count} related file(s)."
         return True, "File deleted successfully."
 
     except Exception as error:
-        return False, f"Unable to delete file: {error}"
+        return False, f"Unable to delete file(s): {error}"
+
+
 
 
 def rename_file(file_path: str, new_name: str):
@@ -124,19 +228,51 @@ def rename_file(file_path: str, new_name: str):
     if not new_name.strip():
         return False, "Please enter a new file name."
 
-    folder_path = os.path.dirname(file_path)
-    new_path = os.path.join(folder_path, new_name.strip())
-    new_path = os.path.abspath(new_path)
+    if os.path.basename(file_path) in [".gitkeep", ".DS_Store"]:
+        return False, "Internal file cannot be renamed."
 
-    if os.path.exists(new_path):
-        return False, "A file with this name already exists."
+    # Preserve extension of the selected file
+    original_base, original_ext = os.path.splitext(os.path.basename(file_path))
+    _, new_ext = os.path.splitext(new_name.strip())
+
+    target_ext = original_ext
+    if new_ext:
+        target_ext = new_ext
+
+    # If user typed only name without extension, keep original extension
+    final_name = new_name.strip()
+    if not new_ext:
+        final_name = final_name + target_ext
+
+    related = find_related_duplicates(file_path)
+
+    if not related:
+        return False, "No related duplicates found to rename."
 
     try:
-        os.rename(file_path, new_path)
+        # First validate all destination paths to avoid partial renames
+        destinations = []
+        for path in related:
+            folder_path = os.path.dirname(path)
+            dest = os.path.abspath(os.path.join(folder_path, final_name))
+            destinations.append((path, dest))
+
+        for _, dest in destinations:
+            # Allow renaming to same path
+            if os.path.exists(dest):
+                if all(src != dest for src, _ in destinations):
+                    return False, "A file with this name already exists."
+
+        # Rename
+        for src, dest in destinations:
+            if os.path.abspath(src) != dest:
+                os.rename(src, dest)
+
         return True, "File renamed successfully."
 
     except Exception as error:
-        return False, f"Unable to rename file: {error}"
+        return False, f"Unable to rename related files: {error}"
+
 
 
 
@@ -144,9 +280,12 @@ def render_folder_tab(tab_title: str, folder_rel_path: str):
     folder_path = get_folder_path(tab_title)
     df = build_folder_dataframe(tab_title)
 
+
+
     if df.empty:
         st.info(f"No files in {tab_title}.")
         return
+
 
 
     st.dataframe(
@@ -174,9 +313,8 @@ def render_folder_tab(tab_title: str, folder_rel_path: str):
             os.path.join(folder_path, selected_file_name)
         )
 
-    st.caption(f"Selected path: {selected_path}")
-
     col1, col2, col3 = st.columns(3)
+
 
     with col1:
         if st.button(
@@ -188,9 +326,8 @@ def render_folder_tab(tab_title: str, folder_rel_path: str):
                 st.warning("Please select a file.")
             else:
                 success, message = open_file(selected_path)
-
                 if success:
-                    st.success(message)
+                    st.success(f"{selected_file_name} opened.")
                 else:
                     st.error(message)
 
@@ -199,7 +336,9 @@ def render_folder_tab(tab_title: str, folder_rel_path: str):
             "New file name",
             value=(selected_file_name if selected_path is not None else ""),
             key=f"rename_input_{folder_name}",
+            placeholder="e.g. report_final.txt",
         )
+
 
         if st.button(
             "Rename",
@@ -211,8 +350,7 @@ def render_folder_tab(tab_title: str, folder_rel_path: str):
             else:
                 success, message = rename_file(selected_path, new_name)
                 if success:
-                    st.success(message)
-                    st.rerun()
+                    st.success(f"{selected_file_name} renamed.")
                 else:
                     st.error(message)
 
@@ -220,6 +358,11 @@ def render_folder_tab(tab_title: str, folder_rel_path: str):
         confirm_delete = st.checkbox(
             "Confirm delete",
             key=f"confirm_delete_{folder_name}",
+        )
+
+        delete_related = st.checkbox(
+            "Delete related duplicates too (advanced)",
+            key=f"delete_related_{folder_name}",
         )
 
         if st.button(
@@ -232,12 +375,13 @@ def render_folder_tab(tab_title: str, folder_rel_path: str):
             elif not confirm_delete:
                 st.warning("Please confirm delete first.")
             else:
-                success, message = delete_file(selected_path)
+                success, message = delete_file(selected_path, delete_related=delete_related)
                 if success:
                     st.success(message)
-                    st.rerun()
                 else:
                     st.error(message)
+
+
 
 
 
@@ -290,15 +434,10 @@ def main():
                     with open(file_path, "w", encoding="utf-8"):
                         pass
 
-                    success, message = open_file(file_path)
-                    if success:
-                        st.success("File created and opened successfully.")
-                    else:
-                        st.warning(
-                            "File created, but could not open automatically."
-                        )
-
+                    st.success("Created successfully.")
                     st.session_state["_refresh_token"] += 1
+
+
 
 
     with colB:
@@ -316,21 +455,29 @@ def main():
 
     with colC:
         st.subheader("Actions")
-        if st.button("Organize Files", key="organize_btn"):
-            organize_files()
-            st.session_state["_refresh_token"] += 1
-        if st.button("Undo Last Organization", key="undo_btn"):
-            undo_last_organization()
-            st.session_state["_refresh_token"] += 1
-        if st.button("Refresh", key="refresh_btn"):
-            st.session_state["_refresh_token"] += 1
+        organize_col, undo_col, refresh_col = st.columns(3)
+
+        with organize_col:
+            if st.button("Organize Files", key="organize_btn", use_container_width=True):
+                organize_files()
+                st.session_state["_refresh_token"] += 1
+                st.rerun()
+
+        with undo_col:
+            if st.button("Undo Last Organization", key="undo_btn", use_container_width=True):
+                undo_last_organization()
+                st.session_state["_refresh_token"] += 1
+                st.rerun()
+
+        with refresh_col:
+            if st.button("Refresh", key="refresh_btn", use_container_width=True):
+                st.session_state["_refresh_token"] += 1
+
 
     with st.expander("Logs", expanded=False):
         st.text(_read_logs())
 
-    # Tabs
-    # Use explicit folder_rel paths to avoid mixing.
-    tab_titles = [
+    folder_names = [
         "Main Folder",
         "Documents",
         "Images",
@@ -342,7 +489,15 @@ def main():
         "Duplicates",
     ]
 
-    tabs = st.tabs(tab_titles)
+    if "current_tab" not in st.session_state:
+        st.session_state.current_tab = "Main Folder"
+
+    selected_tab = st.radio(
+        "Folders",
+        folder_names,
+        horizontal=True,
+        key="current_tab",
+    )
 
     # Force rerender on refresh
     _ = st.session_state["_refresh_token"]
@@ -359,9 +514,8 @@ def main():
         "Duplicates": DUPLICATE_FOLDER,
     }
 
-    for tab, title in zip(tabs, tab_titles):
-        with tab:
-            render_folder_tab(title, folder_rel_map[title])
+    render_folder_tab(selected_tab, folder_rel_map[selected_tab])
+
 
 
 if __name__ == "__main__":

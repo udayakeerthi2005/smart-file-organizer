@@ -1,33 +1,9 @@
-# Python
 __pycache__/
-*.py[cod]
-*$py.class
-
-# Virtual environments
-.venv/
-venv/
-ENV/
-env/
-
-# Packaging / build
-build/
-dist/
-*.egg-info/
-
-# Streamlit
-.streamlit/
-.streamlit/secrets.toml
-
-# Logs
-logs/*.log
-
-# Runtime / persisted data
-data/
-
-# OS / editor
+*.pyc
 .DS_Store
-Thumbs.db
-.vscode/
-.idea/
-*.swp
+logs/*.log
+data/move_history.json
+test_folder/*
+!test_folder/.gitkeep
+
 
