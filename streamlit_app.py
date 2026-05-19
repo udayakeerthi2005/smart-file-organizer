@@ -177,7 +177,7 @@ def find_related_duplicates(selected_path: str):
     return sorted(set(related))
 
 
-def delete_file(file_path: str, delete_related: bool = False):
+def delete_file(file_path: str):
     if not file_path:
         return False, "No file selected."
 
@@ -192,26 +192,13 @@ def delete_file(file_path: str, delete_related: bool = False):
     if os.path.basename(file_path) in [".gitkeep", ".DS_Store"]:
         return False, "Internal file cannot be deleted."
 
-    targets = [file_path]
-
-    if delete_related:
-        related = find_related_duplicates(file_path)
-        targets = related if related else [file_path]
-
-    deleted_count = 0
-
     try:
-        for path in targets:
-            if os.path.exists(path) and os.path.isfile(path):
-                os.remove(path)
-                deleted_count += 1
-
-        if delete_related and deleted_count > 1:
-            return True, f"Deleted {deleted_count} related file(s)."
+        os.remove(file_path)
         return True, "File deleted successfully."
 
     except Exception as error:
         return False, f"Unable to delete file(s): {error}"
+
 
 
 
@@ -360,11 +347,6 @@ def render_folder_tab(tab_title: str, folder_rel_path: str):
             key=f"confirm_delete_{folder_name}",
         )
 
-        delete_related = st.checkbox(
-            "Delete related duplicates too (advanced)",
-            key=f"delete_related_{folder_name}",
-        )
-
         if st.button(
             "Delete",
             key=f"delete_button_{folder_name}",
@@ -375,11 +357,12 @@ def render_folder_tab(tab_title: str, folder_rel_path: str):
             elif not confirm_delete:
                 st.warning("Please confirm delete first.")
             else:
-                success, message = delete_file(selected_path, delete_related=delete_related)
+                success, message = delete_file(selected_path)
                 if success:
                     st.success(message)
                 else:
                     st.error(message)
+
 
 
 
@@ -431,6 +414,8 @@ def main():
                 if os.path.exists(file_path):
                     st.error("File already exists.")
                 else:
+                    # Create any file extension as a blank placeholder (OS will decide how to open it).
+                    # For binary-like extensions, this will still create a 0-byte/empty placeholder, which is acceptable.
                     with open(file_path, "w", encoding="utf-8"):
                         pass
 
